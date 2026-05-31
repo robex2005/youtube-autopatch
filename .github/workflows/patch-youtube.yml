@@ -88,6 +88,30 @@ jobs:
           echo "PATCHES_FILE=$NAME" >> "$GITHUB_ENV"
           ls -lh "$NAME"
 
+      - name: Detect compatible YouTube version
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set +e
+          echo "=== morphe-cli subcommands (for reference) ==="
+          java -jar morphe-cli.jar --help 2>&1 | head -40
+          echo "=== list-versions output ==="
+          java -jar morphe-cli.jar list-versions --patches="$PATCHES_FILE" 2>&1 | tee versions.txt
+          set -e
+          # Grab the versions listed under the YouTube package; the first one
+          # (most patches) is the recommended target.
+          BEST=$(awk '
+            /^com\.google\.android\.youtube[[:space:]]*$/ {cap=1; next}
+            /^[^[:space:]]/ {cap=0}
+            cap {print}
+          ' versions.txt | grep -oP '\d+\.\d+\.\d+' | head -1)
+          if [ -z "$BEST" ]; then
+            echo "::error::Could not detect a compatible YouTube version."
+            echo "::error::Check the 'list-versions output' above for the real format/command name."
+            exit 1
+          fi
+          echo "Compatible YouTube version: $BEST"
+          echo "YT_VERSION=$BEST" >> "$GITHUB_ENV"
+
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
@@ -99,26 +123,22 @@ jobs:
           chmod +x apkeep
           ./apkeep --version
 
-      - name: Download YouTube APK
+      - name: Download YouTube APK (compatible version)
         if: steps.gate.outputs.build == 'true'
         run: |
-          ./apkeep -a "$YT_PACKAGE" -d apk-pure .
+          echo "Downloading YouTube ${YT_VERSION} ..."
+          ./apkeep -a "${YT_PACKAGE}@${YT_VERSION}" -d apk-pure .
           YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.xapk" | head -1)
           if [ -z "$YT_FILE" ]; then
             YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
           fi
           if [ -z "$YT_FILE" ]; then
-            echo "ERROR: YouTube APK was not downloaded." && exit 1
+            echo "::error::YouTube ${YT_VERSION} could not be downloaded from APKPure."
+            exit 1
           fi
           YT_FILE="${YT_FILE#./}"
-          YT_VERSION=$(echo "$YT_FILE" | grep -oP '\d+\.\d+\.\d+' | head -1)
-          if [ -z "$YT_VERSION" ]; then
-            YT_VERSION=$(aapt dump badging "$YT_FILE" 2>/dev/null \
-              | grep -oP "versionName='[^']+'" | cut -d"'" -f2 || echo "unknown")
-          fi
-          echo "YouTube version: $YT_VERSION"
-          echo "YT_APK=$YT_FILE"        >> "$GITHUB_ENV"
-          echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
+          echo "Downloaded: $YT_FILE"
+          echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
 
       - name: Setup keystore
         if: steps.gate.outputs.build == 'true'
@@ -153,7 +173,7 @@ jobs:
       - name: Patch YouTube
         if: steps.gate.outputs.build == 'true'
         run: |
-          OUTPUT="YoutubeM-${{ env.YT_VERSION }}.apk"
+          OUTPUT="YoutubeM-${YT_VERSION}.apk"
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
             --keystore=morphe.keystore \
@@ -163,7 +183,6 @@ jobs:
             --temporary-files-path=/tmp/morphe/ \
             --out="$OUTPUT" \
             --striplibs="$ARCH" \
-            --continue-on-error \
             --purge \
             "$YT_APK"
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
@@ -183,12 +202,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="yt-${{ steps.versions.outputs.patches_tag }}"
+          TAG="yt-${YT_VERSION}-${{ steps.versions.outputs.patches_tag }}"
           gh release create "$TAG" \
-            --title "YoutubeM-${{ env.YT_VERSION }}" \
-            --notes "## Reworked YouTube ${{ env.YT_VERSION }}
+            --title "YoutubeM-${YT_VERSION}" \
+            --notes "## Reworked YouTube ${YT_VERSION}
 
-          This is a reworked YouTube version **${{ env.YT_VERSION }}** patched with Morphe.
+          This is a reworked YouTube version **${YT_VERSION}** patched with Morphe.
 
           ### What's included
           - Ad blocking
@@ -198,13 +217,14 @@ jobs:
           - Tracking removed
 
           ### Versions
-          - YouTube base: \`${{ env.YT_VERSION }}\`
+          - YouTube base: \`${YT_VERSION}\`
           - morphe-patches: \`${{ steps.versions.outputs.patches_tag }}\`
           - morphe-cli: \`${{ steps.versions.outputs.cli_tag }}\`
 
           ### Install
-          Download \`YoutubeM-${{ env.YT_VERSION }}.apk\`, transfer to your phone and install.
-          Allow _Install from unknown sources_ if prompted." \
+          > **Uninstall the stock YouTube app first** — sideloaded APKs use a different signing key, so Android won't let this update the Play Store version.
+
+          Download \`YoutubeM-${YT_VERSION}.apk\`, transfer it to your phone and install. Allow _Install from unknown sources_ if prompted." \
             "$OUTPUT_APK" \
           || echo "::notice::Release $TAG already exists."
 
