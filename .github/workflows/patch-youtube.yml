@@ -111,8 +111,14 @@ jobs:
             echo "ERROR: YouTube APK was not downloaded." && exit 1
           fi
           YT_FILE="${YT_FILE#./}"
-          echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
-          echo "Downloaded: $YT_FILE"
+          YT_VERSION=$(echo "$YT_FILE" | grep -oP '\d+\.\d+\.\d+' | head -1)
+          if [ -z "$YT_VERSION" ]; then
+            YT_VERSION=$(aapt dump badging "$YT_FILE" 2>/dev/null \
+              | grep -oP "versionName='[^']+'" | cut -d"'" -f2 || echo "unknown")
+          fi
+          echo "YouTube version: $YT_VERSION"
+          echo "YT_APK=$YT_FILE"        >> "$GITHUB_ENV"
+          echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
 
       - name: Setup keystore
         if: steps.gate.outputs.build == 'true'
@@ -147,7 +153,7 @@ jobs:
       - name: Patch YouTube
         if: steps.gate.outputs.build == 'true'
         run: |
-          OUTPUT="youtube-patched.apk"
+          OUTPUT="YoutubeM-${{ env.YT_VERSION }}.apk"
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
             --keystore=morphe.keystore \
@@ -166,9 +172,9 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-patched-${{ steps.versions.outputs.patches_tag }}
+          name: YoutubeM-${{ env.YT_VERSION }}-${{ steps.versions.outputs.patches_tag }}
           path: |
-            youtube-patched.apk
+            YoutubeM-*.apk
             keystore.b64.txt
           retention-days: 14
 
@@ -179,8 +185,26 @@ jobs:
         run: |
           TAG="yt-${{ steps.versions.outputs.patches_tag }}"
           gh release create "$TAG" \
-            --title "YouTube — morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
-            --notes "Patched with morphe-cli ${{ steps.versions.outputs.cli_tag }} and morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
+            --title "YoutubeM-${{ env.YT_VERSION }}" \
+            --notes "## Reworked YouTube ${{ env.YT_VERSION }}
+
+          This is a reworked YouTube version **${{ env.YT_VERSION }}** patched with Morphe.
+
+          ### What's included
+          - Ad blocking
+          - SponsorBlock
+          - Return YouTube Dislike
+          - Background play
+          - Tracking removed
+
+          ### Versions
+          - YouTube base: \`${{ env.YT_VERSION }}\`
+          - morphe-patches: \`${{ steps.versions.outputs.patches_tag }}\`
+          - morphe-cli: \`${{ steps.versions.outputs.cli_tag }}\`
+
+          ### Install
+          Download \`YoutubeM-${{ env.YT_VERSION }}.apk\`, transfer to your phone and install.
+          Allow _Install from unknown sources_ if prompted." \
             "$OUTPUT_APK" \
           || echo "::notice::Release $TAG already exists."
 
