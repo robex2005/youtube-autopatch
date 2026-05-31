@@ -123,12 +123,17 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > morphe.keystore
             echo "KS_PASS=${SECRET_PASS:-morphe123}" >> "$GITHUB_ENV"
+            echo "Keystore restored from secret."
           else
-            echo "::warning::No keystore secret — generating a one-time keystore."
+            echo "::warning::No keystore secret — generating BKS keystore."
             echo "::warning::Save keystore.b64.txt artifact as MORPHE_KEYSTORE_BASE64 secret."
+            curl -fsSL -o bcprov.jar \
+              "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk15on/1.70/bcprov-jdk15on-1.70.jar"
             keytool -genkey -v \
               -keystore morphe.keystore \
-              -storetype pkcs12 \
+              -storetype BKS \
+              -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
+              -providerpath bcprov.jar \
               -alias Key \
               -keyalg RSA -keysize 2048 \
               -validity 10000 \
