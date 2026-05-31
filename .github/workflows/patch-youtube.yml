@@ -74,11 +74,13 @@ jobs:
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
-          URL=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest" \
-            | jq -r '.assets[] | select(.name | test("x86_64.*linux|linux.*x86_64")) | .browser_download_url' | head -1)
+          RELEASE=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest")
+          URL=$(echo "$RELEASE" | jq -r \
+            '.assets[] | select(.name | test("x86_64.*linux.*gnu")) | .browser_download_url' | head -1)
           echo "apkeep URL: $URL"
-          curl -Lo apkeep "$URL"
+          curl -fSL -o apkeep "$URL"
           chmod +x apkeep
+          ./apkeep --version
 
       # ── YouTube APK ────────────────────────────────────────────────────────
 
