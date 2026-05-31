@@ -12,17 +12,14 @@ on:
         required: false
         default: ''
   schedule:
-    - cron: '0 6 * * *'   # Daily 06:00 UTC — detects new morphe-patches releases within 24 h
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
 
 env:
   YT_PACKAGE: com.google.android.youtube
-  # Update this when morphe-patches drops support for the current version.
-  # Compatible versions are listed at: https://github.com/MorpheApp/morphe-patches/releases
   YT_DEFAULT_VERSION: '19.47.53'
-  # Keep only this ABI in the patched APK (arm64-v8a suits most modern phones)
   ARCH: arm64-v8a
 
 jobs:
@@ -37,15 +34,15 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── Version discovery ──────────────────────────────────────────────────
-
       - name: Get latest morphe-cli / morphe-patches versions
         id: versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CLI_TAG=$(curl -sf "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" \
-            | jq -r '.tag_name')
-          PATCHES_TAG=$(curl -sf "https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest" \
-            | jq -r '.tag_name')
+          CLI_TAG=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" | jq -r '.tag_name')
+          PATCHES_TAG=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest" | jq -r '.tag_name')
           echo "cli_tag=$CLI_TAG"         >> "$GITHUB_OUTPUT"
           echo "patches_tag=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
           echo "morphe-cli: $CLI_TAG  |  morphe-patches: $PATCHES_TAG"
@@ -63,13 +60,22 @@ jobs:
           if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] \
           && [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Already built for cli=${{ steps.versions.outputs.cli_tag }} patches=${{ steps.versions.outputs.patches_tag }} — skipping."
+            echo "Already built — skipping."
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Tool downloads ─────────────────────────────────────────────────────
-
+      - name: Download morphe-cli JAR
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          URL=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" \
+            | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
+          echo "morphe-cli URL: $URL"
+          curl -fSL -o morphe-cli.jar "$URL"
+          ls -lh morphe-cli.jar
 
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
@@ -81,8 +87,6 @@ jobs:
           curl -fSL -o apkeep "$URL"
           chmod +x apkeep
           ./apkeep --version
-
-      # ── YouTube APK ────────────────────────────────────────────────────────
 
       - name: Resolve YouTube version
         if: steps.gate.outputs.build == 'true'
@@ -97,7 +101,6 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           ./apkeep -a "$YT_PACKAGE" -d apk-pure .
-          # Prefer xapk (full bundle), fall back to apk
           YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.xapk" | head -1)
           if [ -z "$YT_FILE" ]; then
             YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
@@ -108,7 +111,6 @@ jobs:
           YT_FILE="${YT_FILE#./}"
           echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
           echo "Downloaded: $YT_FILE"
-      # ── Keystore ───────────────────────────────────────────────────────────
 
       - name: Setup keystore
         if: steps.gate.outputs.build == 'true'
@@ -119,10 +121,9 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > morphe.keystore
             echo "KS_PASS=${SECRET_PASS:-morphe123}" >> "$GITHUB_ENV"
-            echo "Keystore restored from secret."
           else
-            echo "::warning::MORPHE_KEYSTORE_BASE64 secret not set — generating a one-time keystore."
-            echo "::warning::Save keystore.b64.txt (uploaded as artifact) as the MORPHE_KEYSTORE_BASE64 secret so re-installs don't require uninstalling the app first."
+            echo "::warning::No keystore secret — generating a one-time keystore."
+            echo "::warning::Save keystore.b64.txt artifact as MORPHE_KEYSTORE_BASE64 secret."
             keytool -genkey -v \
               -keystore morphe.keystore \
               -alias Key \
@@ -135,8 +136,6 @@ jobs:
             echo "KS_PASS=morphe123" >> "$GITHUB_ENV"
           fi
 
-      # ── Patching ───────────────────────────────────────────────────────────
-
       - name: Patch YouTube
         if: steps.gate.outputs.build == 'true'
         run: |
@@ -145,7 +144,6 @@ jobs:
           if [ -f patch-config.json ]; then
             OPTS_FLAG="--options-file=patch-config.json"
           fi
-
           java -jar morphe-cli.jar \
             --patches=MorpheApp/morphe-patches \
             --keystore=morphe.keystore \
@@ -159,10 +157,7 @@ jobs:
             --purge \
             $OPTS_FLAG \
             "$YT_APK"
-
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
-
-      # ── Publish ────────────────────────────────────────────────────────────
 
       - name: Upload artifact
         if: steps.gate.outputs.build == 'true'
@@ -182,16 +177,9 @@ jobs:
           TAG="yt-${{ steps.yt.outputs.version }}-${{ steps.versions.outputs.patches_tag }}"
           gh release create "$TAG" \
             --title "YouTube ${{ steps.yt.outputs.version }} — morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
-            --notes "**YouTube:** ${{ steps.yt.outputs.version }}
-          **morphe-cli:** [${{ steps.versions.outputs.cli_tag }}](https://github.com/MorpheApp/morphe-cli/releases/tag/${{ steps.versions.outputs.cli_tag }})
-          **morphe-patches:** [${{ steps.versions.outputs.patches_tag }}](https://github.com/MorpheApp/morphe-patches/releases/tag/${{ steps.versions.outputs.patches_tag }})
-          **Architecture:** ${{ env.ARCH }}
-
-          Install this APK directly on your phone. If you previously installed a build from this repo, you can update without uninstalling — as long as the keystore is the same." \
+            --notes "Patched with morphe-cli ${{ steps.versions.outputs.cli_tag }} and morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
             "$OUTPUT_APK" \
-          || echo "::notice::Release $TAG already exists — skipping release creation."
-
-      # ── Cache bookkeeping ──────────────────────────────────────────────────
+          || echo "::notice::Release $TAG already exists."
 
       - name: Save build cache
         if: steps.gate.outputs.build == 'true'
