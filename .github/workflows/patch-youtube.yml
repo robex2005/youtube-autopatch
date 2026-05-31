@@ -71,14 +71,6 @@ jobs:
       # ── Tool downloads ─────────────────────────────────────────────────────
 
 
-      - name: Download morphe-patches JAR
-        if: steps.gate.outputs.build == 'true'
-        run: |
-          URL=$(curl -sf "https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-          echo "morphe-patches URL: $URL"
-          curl -Lo morphe-patches.jar "$URL"
-
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
