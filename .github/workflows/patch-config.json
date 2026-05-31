@@ -1,0 +1,27 @@
+[
+  {
+    "patchName": "SponsorBlock",
+    "options": [
+      {
+        "key": "enabledCategories",
+        "value": ["sponsor", "selfpromo", "intro", "outro", "preview"]
+      }
+    ]
+  },
+  {
+    "patchName": "Return YouTube Dislike",
+    "options": []
+  },
+  {
+    "patchName": "Hide ads",
+    "options": []
+  },
+  {
+    "patchName": "Background play",
+    "options": []
+  },
+  {
+    "patchName": "Remove tracking",
+    "options": []
+  }
+]
