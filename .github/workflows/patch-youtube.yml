@@ -145,6 +145,7 @@ jobs:
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
             --keystore=morphe.keystore \
+            --keystore-entry-storetype=pkcs12 \
             --keystore-entry-alias=Key \
             --keystore-entry-password="$KS_PASS" \
             --keystore-password="$KS_PASS" \
