@@ -7,10 +7,6 @@ on:
         description: 'Force rebuild even if versions unchanged'
         type: boolean
         default: false
-      youtube_version:
-        description: 'YouTube version to patch (empty = use YT_DEFAULT_VERSION below)'
-        required: false
-        default: ''
   schedule:
     - cron: '0 6 * * *'
 
@@ -19,7 +15,6 @@ permissions:
 
 env:
   YT_PACKAGE: com.google.android.youtube
-  YT_DEFAULT_VERSION: '19.47.53'
   ARCH: arm64-v8a
 
 jobs:
@@ -77,6 +72,22 @@ jobs:
           curl -fSL -o morphe-cli.jar "$URL"
           ls -lh morphe-cli.jar
 
+      - name: Download morphe-patches bundle
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest")
+          URL=$(echo "$RELEASE" | jq -r \
+            '.assets[] | select(.name | test("\\.(zip|tar\\.gz)$") | not) | .browser_download_url' | head -1)
+          NAME=$(echo "$RELEASE" | jq -r \
+            '.assets[] | select(.name | test("\\.(zip|tar\\.gz)$") | not) | .name' | head -1)
+          echo "morphe-patches URL: $URL  ($NAME)"
+          curl -fSL -o "$NAME" "$URL"
+          echo "PATCHES_FILE=$NAME" >> "$GITHUB_ENV"
+          ls -lh "$NAME"
+
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
@@ -87,15 +98,6 @@ jobs:
           curl -fSL -o apkeep "$URL"
           chmod +x apkeep
           ./apkeep --version
-
-      - name: Resolve YouTube version
-        if: steps.gate.outputs.build == 'true'
-        id: yt
-        run: |
-          INPUT="${{ github.event.inputs.youtube_version }}"
-          VER="${INPUT:-$YT_DEFAULT_VERSION}"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "YouTube target version: $VER"
 
       - name: Download YouTube APK
         if: steps.gate.outputs.build == 'true'
@@ -139,13 +141,9 @@ jobs:
       - name: Patch YouTube
         if: steps.gate.outputs.build == 'true'
         run: |
-          OUTPUT="youtube-patched-${{ steps.yt.outputs.version }}.apk"
-          OPTS_FLAG=""
-          if [ -f patch-config.json ]; then
-            OPTS_FLAG="--options-file=patch-config.json"
-          fi
+          OUTPUT="youtube-patched.apk"
           java -jar morphe-cli.jar patch \
-            --patches=MorpheApp/morphe-patches \
+            --patches="$PATCHES_FILE" \
             --keystore=morphe.keystore \
             --keystore-entry-alias=Key \
             --keystore-entry-password="$KS_PASS" \
@@ -155,7 +153,6 @@ jobs:
             --striplibs="$ARCH" \
             --continue-on-error \
             --purge \
-            $OPTS_FLAG \
             "$YT_APK"
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
 
@@ -163,9 +160,9 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-patched-${{ steps.yt.outputs.version }}-${{ steps.versions.outputs.patches_tag }}
+          name: youtube-patched-${{ steps.versions.outputs.patches_tag }}
           path: |
-            youtube-patched-*.apk
+            youtube-patched.apk
             keystore.b64.txt
           retention-days: 14
 
@@ -174,9 +171,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="yt-${{ steps.yt.outputs.version }}-${{ steps.versions.outputs.patches_tag }}"
+          TAG="yt-${{ steps.versions.outputs.patches_tag }}"
           gh release create "$TAG" \
-            --title "YouTube ${{ steps.yt.outputs.version }} — morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
+            --title "YouTube — morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
             --notes "Patched with morphe-cli ${{ steps.versions.outputs.cli_tag }} and morphe-patches ${{ steps.versions.outputs.patches_tag }}" \
             "$OUTPUT_APK" \
           || echo "::notice::Release $TAG already exists."
