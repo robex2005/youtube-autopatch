@@ -70,13 +70,6 @@ jobs:
 
       # ── Tool downloads ─────────────────────────────────────────────────────
 
-      - name: Download morphe-cli JAR
-        if: steps.gate.outputs.build == 'true'
-        run: |
-          URL=$(curl -sf "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-          echo "morphe-cli URL: $URL"
-          curl -Lo morphe-cli.jar "$URL"
 
       - name: Download morphe-patches JAR
         if: steps.gate.outputs.build == 'true'
@@ -158,7 +151,7 @@ jobs:
           fi
 
           java -jar morphe-cli.jar \
-            --patches=morphe-patches.jar \
+            --patches=MorpheApp/morphe-patches \
             --keystore=morphe.keystore \
             --keystore-entry-alias=Key \
             --keystore-entry-password="$KS_PASS" \
