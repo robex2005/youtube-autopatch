@@ -50,9 +50,10 @@ Update MicroG-RE the same way if its version has changed in the release.
 
 | Problem | Fix |
 |---------|-----|
-| App force closes on launch | Install MicroG-RE first, then reinstall YoutubeM |
+| App force closes on launch | Install MicroG-RE **first**, then (re)install YoutubeM. Always use the `YoutubeM` and `MicroG-RE` APKs **from the same release** — mismatched versions can crash on launch. |
+| MicroG-RE won't open / does nothing | Open it once and grant it **battery/background** permission (Settings → Apps → MicroG → Battery → Unrestricted). It runs mostly as a background service; a blank screen is normal. Make sure you installed the regular APK, not a debug build. |
 | "App not installed" error | Uninstall stock YouTube from Play Store first |
-| Can't sign in | Make sure MicroG-RE is installed and up to date |
+| Can't sign in | Make sure MicroG-RE is installed, up to date, and allowed to run in the background |
 | Missing features | Some patches only apply to specific YouTube versions — check the release notes |
 
 ---

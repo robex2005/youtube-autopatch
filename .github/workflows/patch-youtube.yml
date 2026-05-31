@@ -94,12 +94,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          URL=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
-          NAME=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".apk")) | .name' | head -1)
+          RELEASE=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest")
+          # Pick the real app APK: largest .apk asset that isn't a debug build.
+          # head -1 previously could grab a debug/variant APK that won't open.
+          PICK=$(echo "$RELEASE" | jq -r '
+            [.assets[]
+              | select(.name | endswith(".apk"))
+              | select(.name | test("debug"; "i") | not)]
+            | sort_by(.size) | last
+            | "\(.name)\t\(.browser_download_url)"')
+          NAME=$(printf '%s' "$PICK" | cut -f1)
+          URL=$(printf '%s' "$PICK" | cut -f2)
+          if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then
+            echo "::error::No MicroG-RE .apk asset found in latest release." && exit 1
+          fi
           echo "Downloading MicroG-RE: $NAME"
           curl -fSL -o "$NAME" "$URL"
           echo "MICROG_FILE=$NAME" >> "$GITHUB_ENV"
@@ -171,8 +180,25 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           OUTPUT="YoutubeM-${YT_VERSION}.apk"
+
+          # Explicitly enable the patches listed in patch-config.json (additive —
+          # all default patches still apply). This guarantees the critical
+          # "GmsCore support" patch is on: without it the patched app cannot
+          # reach MicroG and force-closes on launch. -e fails loudly if a name
+          # no longer exists upstream, surfacing patch renames instead of
+          # silently shipping a broken build.
+          PATCH_ARGS=()
+          while IFS= read -r name; do
+            [ -n "$name" ] && PATCH_ARGS+=(-e "$name")
+          done < <(jq -r '.[].patchName' .github/workflows/patch-config.json)
+          echo "Enabling patches: ${PATCH_ARGS[*]}"
+
+          # NOTE: --continue-on-error was removed deliberately. With it, a failed
+          # GmsCore/critical patch was swallowed and a force-closing APK shipped.
+          # Any patch failure must now abort the build (pipefail is on by default).
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
+            "${PATCH_ARGS[@]}" \
             --keystore=morphe.keystore \
             --keystore-entry-alias=Key \
             --keystore-entry-password="$KS_PASS" \
@@ -180,9 +206,18 @@ jobs:
             --temporary-files-path=/tmp/morphe/ \
             --out="$OUTPUT" \
             --striplibs="$ARCH" \
-            --continue-on-error \
             --purge \
-            "$YT_APK"
+            "$YT_APK" 2>&1 | tee patch.log
+
+          # Sanity-check the output so we never publish a truncated/broken APK.
+          if [ ! -f "$OUTPUT" ]; then
+            echo "::error::Patched APK was not produced." && exit 1
+          fi
+          SIZE=$(stat -c%s "$OUTPUT")
+          echo "Patched APK size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then
+            echo "::error::Patched APK is suspiciously small ($SIZE bytes) — likely broken." && exit 1
+          fi
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -240,8 +275,15 @@ jobs:
           - morphe-patches: \`${{ steps.versions.outputs.patches_tag }}\`
           - morphe-cli: \`${{ steps.versions.outputs.cli_tag }}\`
           - MicroG-RE: \`${{ steps.versions.outputs.microg_tag }}\`" \
-            "$OUTPUT_APK" "$MICROG_FILE" \
-          || echo "::notice::Release $TAG already exists."
+            "$OUTPUT_APK" "$MICROG_FILE" && { echo "Release $TAG created."; exit 0; }
+          # Creation failed — only tolerate the "tag already exists" case.
+          # Previously every failure was swallowed, which is why the repo had
+          # zero published releases despite successful builds.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists — skipping."
+          else
+            echo "::error::Failed to create release $TAG." && exit 1
+          fi
 
       - name: Save build cache
         if: steps.gate.outputs.build == 'true'
