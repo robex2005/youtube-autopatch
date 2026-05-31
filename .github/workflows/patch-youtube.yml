@@ -29,7 +29,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Get latest morphe-cli / morphe-patches versions
+      - name: Get latest tool versions
         id: versions
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,9 +38,12 @@ jobs:
             "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" | jq -r '.tag_name')
           PATCHES_TAG=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest" | jq -r '.tag_name')
+          MICROG_TAG=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" | jq -r '.tag_name')
           echo "cli_tag=$CLI_TAG"         >> "$GITHUB_OUTPUT"
           echo "patches_tag=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
-          echo "morphe-cli: $CLI_TAG  |  morphe-patches: $PATCHES_TAG"
+          echo "microg_tag=$MICROG_TAG"   >> "$GITHUB_OUTPUT"
+          echo "morphe-cli: $CLI_TAG | morphe-patches: $PATCHES_TAG | MicroG-RE: $MICROG_TAG"
 
       - name: Restore build cache
         id: cache
@@ -68,7 +71,6 @@ jobs:
           URL=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/MorpheApp/morphe-cli/releases/latest" \
             | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-          echo "morphe-cli URL: $URL"
           curl -fSL -o morphe-cli.jar "$URL"
           ls -lh morphe-cli.jar
 
@@ -83,51 +85,59 @@ jobs:
             '.assets[] | select(.name | test("\\.(zip|tar\\.gz)$") | not) | .browser_download_url' | head -1)
           NAME=$(echo "$RELEASE" | jq -r \
             '.assets[] | select(.name | test("\\.(zip|tar\\.gz)$") | not) | .name' | head -1)
-          echo "morphe-patches URL: $URL  ($NAME)"
           curl -fSL -o "$NAME" "$URL"
           echo "PATCHES_FILE=$NAME" >> "$GITHUB_ENV"
+          ls -lh "$NAME"
+
+      - name: Download MicroG-RE
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          URL=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
+            | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
+          NAME=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
+            | jq -r '.assets[] | select(.name | endswith(".apk")) | .name' | head -1)
+          echo "Downloading MicroG-RE: $NAME"
+          curl -fSL -o "$NAME" "$URL"
+          echo "MICROG_FILE=$NAME" >> "$GITHUB_ENV"
           ls -lh "$NAME"
 
       - name: Detect compatible YouTube version
         if: steps.gate.outputs.build == 'true'
         run: |
           java -jar morphe-cli.jar list-versions --patches="$PATCHES_FILE" 2>&1 | tee versions.txt
-          # Capture versions under the YouTube package; first line = most patches.
           BEST=$(awk '
             /^Package name: com\.google\.android\.youtube[[:space:]]*$/ {cap=1; next}
             /^Package name:/ {cap=0}
             cap {print}
           ' versions.txt | grep -oP '\d+\.\d+\.\d+' | head -1)
           if [ -z "$BEST" ]; then
-            echo "::error::Could not detect a compatible YouTube version."
-            exit 1
+            echo "::error::Could not detect compatible YouTube version." && exit 1
           fi
           echo "Compatible YouTube version: $BEST"
           echo "YT_VERSION=$BEST" >> "$GITHUB_ENV"
-          
+
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
-          RELEASE=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest")
-          URL=$(echo "$RELEASE" | jq -r \
-            '.assets[] | select(.name | test("x86_64.*linux.*gnu")) | .browser_download_url' | head -1)
-          echo "apkeep URL: $URL"
+          URL=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest" \
+            | jq -r '.assets[] | select(.name | test("x86_64.*linux.*gnu")) | .browser_download_url' | head -1)
           curl -fSL -o apkeep "$URL"
           chmod +x apkeep
           ./apkeep --version
 
-      - name: Download YouTube APK (compatible version)
+      - name: Download YouTube APK
         if: steps.gate.outputs.build == 'true'
         run: |
-          echo "Downloading YouTube ${YT_VERSION} ..."
+          echo "Downloading YouTube ${YT_VERSION}..."
           ./apkeep -a "${YT_PACKAGE}@${YT_VERSION}" -d apk-pure .
           YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.xapk" | head -1)
+          [ -z "$YT_FILE" ] && YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
           if [ -z "$YT_FILE" ]; then
-            YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
-          fi
-          if [ -z "$YT_FILE" ]; then
-            echo "::error::YouTube ${YT_VERSION} could not be downloaded from APKPure."
-            exit 1
+            echo "::error::YouTube ${YT_VERSION} not downloaded." && exit 1
           fi
           YT_FILE="${YT_FILE#./}"
           echo "Downloaded: $YT_FILE"
@@ -142,23 +152,17 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > morphe.keystore
             echo "KS_PASS=${SECRET_PASS:-morphe123}" >> "$GITHUB_ENV"
-            echo "Keystore restored from secret."
           else
-            echo "::warning::No keystore secret — generating BKS keystore."
-            echo "::warning::Save keystore.b64.txt artifact as MORPHE_KEYSTORE_BASE64 secret."
+            echo "::warning::Generating BKS keystore — save keystore.b64.txt as MORPHE_KEYSTORE_BASE64 secret."
             curl -fsSL -o bcprov.jar \
               "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk15on/1.70/bcprov-jdk15on-1.70.jar"
             keytool -genkey -v \
-              -keystore morphe.keystore \
-              -storetype BKS \
+              -keystore morphe.keystore -storetype BKS \
               -provider org.bouncycastle.jce.provider.BouncyCastleProvider \
               -providerpath bcprov.jar \
-              -alias Key \
-              -keyalg RSA -keysize 2048 \
-              -validity 10000 \
+              -alias Key -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass morphe123 -keypass morphe123 \
-              -dname "CN=MorpheYT, O=MorpheYT, C=US" \
-              -noprompt
+              -dname "CN=MorpheYT, O=MorpheYT, C=US" -noprompt
             base64 morphe.keystore > keystore.b64.txt
             echo "KS_PASS=morphe123" >> "$GITHUB_ENV"
           fi
@@ -176,6 +180,7 @@ jobs:
             --temporary-files-path=/tmp/morphe/ \
             --out="$OUTPUT" \
             --striplibs="$ARCH" \
+            --continue-on-error \
             --purge \
             "$YT_APK"
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
@@ -187,6 +192,7 @@ jobs:
           name: YoutubeM-${{ env.YT_VERSION }}-${{ steps.versions.outputs.patches_tag }}
           path: |
             YoutubeM-*.apk
+            *.apk
             keystore.b64.txt
           retention-days: 14
 
@@ -202,23 +208,39 @@ jobs:
 
           This is a reworked YouTube version **${YT_VERSION}** patched with Morphe.
 
-          ### What's included
-          - Ad blocking
-          - SponsorBlock
-          - Return YouTube Dislike
-          - Background play
-          - Tracking removed
+          ---
 
-          ### Versions
+          ### 📦 Files in this release
+
+          | File | Purpose |
+          |------|---------|
+          | \`YoutubeM-${YT_VERSION}.apk\` | Patched YouTube — install this |
+          | \`${{ env.MICROG_FILE }}\` | MicroG-RE (required — prevents force close) |
+
+          ---
+
+          ### ⚙️ Setup — first time
+
+          > Follow these steps **in order**. Skipping MicroG-RE is the #1 cause of force close.
+
+          1. **Uninstall stock YouTube** from your phone (Play Store version uses Google's signature — it blocks this APK)
+          2. **Install MicroG-RE** (\`${{ env.MICROG_FILE }}\`) first
+          3. **Install YoutubeM** (\`YoutubeM-${YT_VERSION}.apk\`)
+          4. Open YoutubeM — sign in with your Google account when prompted
+
+          ### 🔄 Updating later
+
+          When a new release appears here, just install the new \`YoutubeM-*.apk\` directly over the old one — no uninstall needed, as long as you always use APKs from this repo (same signing key).
+          Update MicroG-RE the same way if its version changed.
+
+          ---
+
+          ### 🔧 Versions
           - YouTube base: \`${YT_VERSION}\`
           - morphe-patches: \`${{ steps.versions.outputs.patches_tag }}\`
           - morphe-cli: \`${{ steps.versions.outputs.cli_tag }}\`
-
-          ### Install
-          > **Uninstall the stock YouTube app first** — sideloaded APKs use a different signing key, so Android won't let this update the Play Store version.
-
-          Download \`YoutubeM-${YT_VERSION}.apk\`, transfer it to your phone and install. Allow _Install from unknown sources_ if prompted." \
-            "$OUTPUT_APK" \
+          - MicroG-RE: \`${{ steps.versions.outputs.microg_tag }}\`" \
+            "$OUTPUT_APK" "$MICROG_FILE" \
           || echo "::notice::Release $TAG already exists."
 
       - name: Save build cache
