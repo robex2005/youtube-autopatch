@@ -133,26 +133,31 @@ jobs:
           echo "Compatible YouTube version: $BEST"
           echo "YT_VERSION=$BEST" >> "$GITHUB_ENV"
 
-      - name: Install apkeep
+      - name: Download YouTube APK (APKMirror)
         if: steps.gate.outputs.build == 'true'
         run: |
-          URL=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest" \
-            | jq -r '.assets[] | select(.name | test("x86_64.*linux.*gnu")) | .browser_download_url' | head -1)
-          curl -fSL -o apkeep "$URL"
-          chmod +x apkeep
-          ./apkeep --version
-
-      - name: Download YouTube APK
-        if: steps.gate.outputs.build == 'true'
-        run: |
-          echo "Downloading YouTube ${YT_VERSION}..."
-          ./apkeep -a "${YT_PACKAGE}@${YT_VERSION}" -d apk-pure .
-          YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.xapk" | head -1)
-          [ -z "$YT_FILE" ] && YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
+          # Pull the pre-merged *universal* APK from APKMirror instead of an
+          # APKPure split bundle. APKPure's XAPK, after merging, produced an
+          # app that force-closed instantly on launch; APKMirror's universal
+          # APK (split-required flags cleared) is what the Morphe/ReVanced
+          # ecosystem builds against. apkmirror-downloader defaults to
+          # type=apk, arch=universal, dpi=nodpi — exactly what we want — and
+          # auto-merges if only a bundle is available.
+          npm install -g apkmirror-downloader@latest
+          mkdir -p yt-dl
+          # arch=universal + outDir are documented option keys; dpi=nodpi and
+          # type=apk are the tool's defaults, so we don't need to set them.
+          jq -n --arg v "$YT_VERSION" \
+            '{options:{outDir:"yt-dl",arch:"universal"},
+              apps:[{org:"google-inc",repo:"youtube",version:$v}]}' > apps.json
+          echo "Downloading YouTube ${YT_VERSION} from APKMirror..."
+          apkmd apps.json
+          # Prefer a single APK; fall back to a bundle (morphe-cli will merge it).
+          YT_FILE=$(find yt-dl -type f -name '*.apk' | head -1)
+          [ -z "$YT_FILE" ] && YT_FILE=$(find yt-dl -type f \( -name '*.apkm' -o -name '*.xapk' -o -name '*.apks' \) | head -1)
           if [ -z "$YT_FILE" ]; then
-            echo "::error::YouTube ${YT_VERSION} not downloaded." && exit 1
+            echo "::error::YouTube ${YT_VERSION} not downloaded from APKMirror." && exit 1
           fi
-          YT_FILE="${YT_FILE#./}"
           echo "Downloaded: $YT_FILE"
           echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
 
