@@ -139,10 +139,6 @@ jobs:
             echo "KS_PASS=morphe123" >> "$GITHUB_ENV"
           fi
 
-      - name: Print patch help
-        if: steps.gate.outputs.build == 'true'
-        run: java -jar morphe-cli.jar patch --help
-
       - name: Patch YouTube
         if: steps.gate.outputs.build == 'true'
         run: |
@@ -150,7 +146,7 @@ jobs:
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
             --keystore=morphe.keystore \
-            --keystore-entry-alias=Key \
+            --keystore-alias=Key \
             --keystore-entry-password="$KS_PASS" \
             --keystore-password="$KS_PASS" \
             --temporary-files-path=/tmp/morphe/ \
