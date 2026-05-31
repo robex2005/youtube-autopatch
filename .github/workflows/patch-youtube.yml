@@ -91,27 +91,20 @@ jobs:
       - name: Detect compatible YouTube version
         if: steps.gate.outputs.build == 'true'
         run: |
-          set +e
-          echo "=== morphe-cli subcommands (for reference) ==="
-          java -jar morphe-cli.jar --help 2>&1 | head -40
-          echo "=== list-versions output ==="
           java -jar morphe-cli.jar list-versions --patches="$PATCHES_FILE" 2>&1 | tee versions.txt
-          set -e
-          # Grab the versions listed under the YouTube package; the first one
-          # (most patches) is the recommended target.
+          # Capture versions under the YouTube package; first line = most patches.
           BEST=$(awk '
-            /^com\.google\.android\.youtube[[:space:]]*$/ {cap=1; next}
-            /^[^[:space:]]/ {cap=0}
+            /^Package name: com\.google\.android\.youtube[[:space:]]*$/ {cap=1; next}
+            /^Package name:/ {cap=0}
             cap {print}
           ' versions.txt | grep -oP '\d+\.\d+\.\d+' | head -1)
           if [ -z "$BEST" ]; then
             echo "::error::Could not detect a compatible YouTube version."
-            echo "::error::Check the 'list-versions output' above for the real format/command name."
             exit 1
           fi
           echo "Compatible YouTube version: $BEST"
           echo "YT_VERSION=$BEST" >> "$GITHUB_ENV"
-
+          
       - name: Install apkeep
         if: steps.gate.outputs.build == 'true'
         run: |
