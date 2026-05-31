@@ -96,7 +96,7 @@ jobs:
       - name: Download YouTube APK
         if: steps.gate.outputs.build == 'true'
         run: |
-          ./apkeep -a "$YT_PACKAGE" -d APKPure .
+          ./apkeep -a "$YT_PACKAGE" -d apk-pure .
           YT_FILE=$(ls "${YT_PACKAGE}"*.apk "${YT_PACKAGE}"*.xapk 2>/dev/null \
                  || ls YouTube*.apk YouTube*.xapk 2>/dev/null \
                  || ls *.apk *.xapk 2>/dev/null | head -1)
