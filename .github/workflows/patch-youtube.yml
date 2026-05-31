@@ -7,6 +7,10 @@ on:
         description: 'Force rebuild even if versions unchanged'
         type: boolean
         default: false
+      safe_mode:
+        description: 'Diagnostic: build with ONLY the microG patch (no other patches) to isolate launch crashes'
+        type: boolean
+        default: false
   schedule:
     - cron: '0 6 * * *'
 
@@ -187,10 +191,18 @@ jobs:
           # reach MicroG and force-closes on launch. -e fails loudly if a name
           # no longer exists upstream, surfacing patch renames instead of
           # silently shipping a broken build.
-          PATCH_ARGS=()
-          while IFS= read -r name; do
-            [ -n "$name" ] && PATCH_ARGS+=(-e "$name")
-          done < <(jq -r '.[].patchName' .github/workflows/patch-config.json)
+          if [ "${{ github.event.inputs.safe_mode }}" = "true" ]; then
+            # Diagnostic build: ONLY "GmsCore support" (+ its dependencies).
+            # --exclusive disables every other patch. If this build launches but
+            # the full build force-closes, a non-essential patch is the cause.
+            PATCH_ARGS=(--exclusive -e "GmsCore support")
+            echo "SAFE MODE: minimal patch set (GmsCore support + dependencies only)"
+          else
+            PATCH_ARGS=()
+            while IFS= read -r name; do
+              [ -n "$name" ] && PATCH_ARGS+=(-e "$name")
+            done < <(jq -r '.[].patchName' .github/workflows/patch-config.json)
+          fi
           echo "Enabling patches: ${PATCH_ARGS[*]}"
 
           # NOTE: --continue-on-error was removed deliberately. With it, a failed
