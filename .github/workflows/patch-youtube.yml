@@ -7,6 +7,14 @@ on:
         description: 'Force rebuild even if versions unchanged'
         type: boolean
         default: false
+      safe_mode:
+        description: 'Diagnostic: build with ONLY the microG patch (no other patches) to isolate launch crashes'
+        type: boolean
+        default: false
+      youtube_apk_url:
+        description: 'Optional: direct download URL to a YouTube APK/bundle (e.g. a GitHub Release asset you uploaded). Bypasses the APKMirror download when set.'
+        type: string
+        default: ''
   schedule:
     - cron: '0 6 * * *'
 
@@ -94,12 +102,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          URL=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -1)
-          NAME=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith(".apk")) | .name' | head -1)
+          RELEASE=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/MorpheApp/MicroG-RE/releases/latest")
+          # Pick the real app APK: largest .apk asset that isn't a debug build.
+          # head -1 previously could grab a debug/variant APK that won't open.
+          PICK=$(echo "$RELEASE" | jq -r '
+            [.assets[]
+              | select(.name | endswith(".apk"))
+              | select(.name | test("debug"; "i") | not)]
+            | sort_by(.size) | last
+            | "\(.name)\t\(.browser_download_url)"')
+          NAME=$(printf '%s' "$PICK" | cut -f1)
+          URL=$(printf '%s' "$PICK" | cut -f2)
+          if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then
+            echo "::error::No MicroG-RE .apk asset found in latest release." && exit 1
+          fi
           echo "Downloading MicroG-RE: $NAME"
           curl -fSL -o "$NAME" "$URL"
           echo "MICROG_FILE=$NAME" >> "$GITHUB_ENV"
@@ -120,26 +137,114 @@ jobs:
           echo "Compatible YouTube version: $BEST"
           echo "YT_VERSION=$BEST" >> "$GITHUB_ENV"
 
-      - name: Install apkeep
+      - name: Download YouTube APK (APKMirror)
         if: steps.gate.outputs.build == 'true'
+        env:
+          UA: "Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"
         run: |
-          URL=$(curl -sf "https://api.github.com/repos/EFForg/apkeep/releases/latest" \
-            | jq -r '.assets[] | select(.name | test("x86_64.*linux.*gnu")) | .browser_download_url' | head -1)
-          curl -fSL -o apkeep "$URL"
-          chmod +x apkeep
-          ./apkeep --version
+          mkdir -p yt-dl
 
-      - name: Download YouTube APK
-        if: steps.gate.outputs.build == 'true'
-        run: |
-          echo "Downloading YouTube ${YT_VERSION}..."
-          ./apkeep -a "${YT_PACKAGE}@${YT_VERSION}" -d apk-pure .
-          YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.xapk" | head -1)
-          [ -z "$YT_FILE" ] && YT_FILE=$(find . -maxdepth 1 -name "${YT_PACKAGE}*.apk" | head -1)
-          if [ -z "$YT_FILE" ]; then
-            echo "::error::YouTube ${YT_VERSION} not downloaded." && exit 1
+          # --- Manual override: download from a user-supplied URL and skip APKMirror. ---
+          # Use this when APKMirror Cloudflare-blocks the runner: download the YouTube
+          # bundle yourself (residential IP), upload it (e.g. a GitHub Release asset),
+          # and pass its direct link as the youtube_apk_url input.
+          URL="${{ github.event.inputs.youtube_apk_url }}"
+          if [ -n "$URL" ]; then
+            echo "Using manually supplied YouTube URL (bypassing APKMirror)."
+            case "$URL" in
+              *.apkm*) OUT="yt-dl/youtube-${YT_VERSION}.apkm" ;;
+              *.xapk*) OUT="yt-dl/youtube-${YT_VERSION}.xapk" ;;
+              *.apks*) OUT="yt-dl/youtube-${YT_VERSION}.apks" ;;
+              *)       OUT="yt-dl/youtube-${YT_VERSION}.apk"  ;;
+            esac
+            curl -fSL -H "User-Agent: $UA" "$URL" -o "$OUT"
+            YT_FILE=$(find yt-dl -type f \( -name '*.apkm' -o -name '*.xapk' -o -name '*.apks' -o -name '*.apk' \) -size +1M | head -1)
+            if [ -z "$YT_FILE" ]; then
+              echo "::error::Download from youtube_apk_url failed or the file is too small." && exit 1
+            fi
+            echo "Downloaded: $YT_FILE"
+            echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
+            exit 0
           fi
-          YT_FILE="${YT_FILE#./}"
+
+          # APKMirror download ported from the battle-tested j-hc/revanced-magisk-module
+          # flow: a browser-like User-Agent + a persistent cookie jar, walking the
+          # variants page -> download page -> final link with htmlq. We grab the
+          # arm64-v8a (fallback universal) nodpi BUNDLE; morphe-cli merges the .apkm.
+          # Install htmlq (HTML query CLI used to parse APKMirror's pages).
+          HQ_URL=$(curl -sf "https://api.github.com/repos/mgdm/htmlq/releases/latest" \
+            | jq -r '.assets[]|select(.name|test("x86_64.*linux"))|.browser_download_url' | head -1)
+          curl -fsSL "$HQ_URL" -o htmlq.tar.gz
+          tar -xzf htmlq.tar.gz
+          sudo mv htmlq /usr/local/bin/ && htmlq --version
+
+          COOKIE="$(mktemp)"
+          BASE="https://www.apkmirror.com"
+          req() { curl -L -c "$COOKIE" -b "$COOKIE" --connect-timeout 15 --retry 2 -fsS \
+            -H "User-Agent: $UA" -H "Accept-Language: en-US,en;q=0.9" "$1"; }
+          isoneof() { local i s="$1"; shift; for i; do [ "$i" = "$s" ] && return 0; done; return 1; }
+
+          # Find the download-page link for a row matching dpi/arch/type.
+          apkmirror_search() {
+            local resp="$1" dpi="$2" arch="$3" apk_bundle="$4"
+            local apparch
+            if [ "$arch" = "universal" ]; then
+              apparch=("universal" "noarch" "arm64-v8a + armeabi-v7a + x86 + x86_64")
+            else apparch=("$arch"); fi
+            local appdpi=("nodpi" "anydpi"); [ -n "$dpi" ] && appdpi+=("$dpi")
+            local n node emptyCheck app_table dlurl=""
+            for ((n = 1; n < 40; n++)); do
+              node=$(htmlq "div.table-row.headerFont:nth-last-child($n)" -r "span:nth-child(n+3)" <<<"$resp")
+              [ -z "$node" ] && break
+              emptyCheck=$(htmlq -t -w "div.table-cell:nth-child(1) > a:nth-child(1)" <<<"$node" | xargs)
+              [ -z "$emptyCheck" ] && break
+              app_table=$(htmlq --text --ignore-whitespace <<<"$node")
+              [ "$(sed -n 3p <<<"$app_table")" != "$apk_bundle" ] && continue
+              dlurl=$(htmlq --base "$BASE" --attribute href "div:nth-child(1) > a:nth-child(1)" <<<"$node")
+              if isoneof "$(sed -n 6p <<<"$app_table")" "${appdpi[@]}" \
+                && isoneof "$(sed -n 4p <<<"$app_table")" "${apparch[@]}"; then
+                echo "$dlurl"; return 0
+              fi
+            done
+            [ "$n" -eq 2 ] && [ -n "$dlurl" ] && { echo "$dlurl"; return 0; }
+            return 1
+          }
+
+          download_youtube() {
+            local rel resp dlurl="" is_bundle=false a t btn final
+            rel="$BASE/apk/google-inc/youtube/youtube-${YT_VERSION//./-}-release/"
+            echo "Variants page: $rel"
+            resp=$(req "$rel") || return 1
+            for a in arm64-v8a universal; do
+              for t in BUNDLE APK; do
+                if dlurl=$(apkmirror_search "$resp" "nodpi" "$a" "$t"); then
+                  [ "$t" = "BUNDLE" ] && is_bundle=true || is_bundle=false
+                  echo "Matched variant: arch=$a type=$t"; break 2
+                fi
+              done
+            done
+            [ -z "$dlurl" ] && { echo "No matching variant found."; return 1; }
+            resp=$(req "$dlurl") || return 1
+            btn=$(htmlq --base "$BASE" --attribute href "a.btn" <<<"$resp") || return 1
+            final=$(req "$btn" | htmlq --base "$BASE" --attribute href "span > a[rel = nofollow]") || return 1
+            if [ "$is_bundle" = true ]; then
+              req "$final" > "yt-dl/youtube-${YT_VERSION}.apkm" || return 1
+            else
+              req "$final" > "yt-dl/youtube-${YT_VERSION}.apk" || return 1
+            fi
+          }
+
+          # APKMirror sometimes Cloudflare-challenges CI IPs — retry a few times.
+          YT_FILE=""
+          for n in 1 2 3 4; do
+            download_youtube || echo "Attempt $n failed."
+            YT_FILE=$(find yt-dl -type f \( -name '*.apkm' -o -name '*.apk' \) -size +1M | head -1)
+            [ -n "$YT_FILE" ] && break
+            echo "No file yet — retry $n in $((n*15))s..."; sleep $((n*15))
+          done
+          if [ -z "$YT_FILE" ]; then
+            echo "::error::Could not download YouTube ${YT_VERSION} from APKMirror (likely a Cloudflare block on the runner IP)." && exit 1
+          fi
           echo "Downloaded: $YT_FILE"
           echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
 
@@ -171,8 +276,33 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           OUTPUT="YoutubeM-${YT_VERSION}.apk"
+
+          # Explicitly enable the patches listed in patch-config.json (additive —
+          # all default patches still apply). This guarantees the critical
+          # "GmsCore support" patch is on: without it the patched app cannot
+          # reach MicroG and force-closes on launch. -e fails loudly if a name
+          # no longer exists upstream, surfacing patch renames instead of
+          # silently shipping a broken build.
+          if [ "${{ github.event.inputs.safe_mode }}" = "true" ]; then
+            # Diagnostic build: ONLY "GmsCore support" (+ its dependencies).
+            # --exclusive disables every other patch. If this build launches but
+            # the full build force-closes, a non-essential patch is the cause.
+            PATCH_ARGS=(--exclusive -e "GmsCore support")
+            echo "SAFE MODE: minimal patch set (GmsCore support + dependencies only)"
+          else
+            PATCH_ARGS=()
+            while IFS= read -r name; do
+              [ -n "$name" ] && PATCH_ARGS+=(-e "$name")
+            done < <(jq -r '.[].patchName' .github/workflows/patch-config.json)
+          fi
+          echo "Enabling patches: ${PATCH_ARGS[*]}"
+
+          # NOTE: --continue-on-error was removed deliberately. With it, a failed
+          # GmsCore/critical patch was swallowed and a force-closing APK shipped.
+          # Any patch failure must now abort the build (pipefail is on by default).
           java -jar morphe-cli.jar patch \
             --patches="$PATCHES_FILE" \
+            "${PATCH_ARGS[@]}" \
             --keystore=morphe.keystore \
             --keystore-entry-alias=Key \
             --keystore-entry-password="$KS_PASS" \
@@ -180,9 +310,18 @@ jobs:
             --temporary-files-path=/tmp/morphe/ \
             --out="$OUTPUT" \
             --striplibs="$ARCH" \
-            --continue-on-error \
             --purge \
-            "$YT_APK"
+            "$YT_APK" 2>&1 | tee patch.log
+
+          # Sanity-check the output so we never publish a truncated/broken APK.
+          if [ ! -f "$OUTPUT" ]; then
+            echo "::error::Patched APK was not produced." && exit 1
+          fi
+          SIZE=$(stat -c%s "$OUTPUT")
+          echo "Patched APK size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then
+            echo "::error::Patched APK is suspiciously small ($SIZE bytes) — likely broken." && exit 1
+          fi
           echo "OUTPUT_APK=$OUTPUT" >> "$GITHUB_ENV"
 
       - name: Upload artifact
@@ -240,8 +379,15 @@ jobs:
           - morphe-patches: \`${{ steps.versions.outputs.patches_tag }}\`
           - morphe-cli: \`${{ steps.versions.outputs.cli_tag }}\`
           - MicroG-RE: \`${{ steps.versions.outputs.microg_tag }}\`" \
-            "$OUTPUT_APK" "$MICROG_FILE" \
-          || echo "::notice::Release $TAG already exists."
+            "$OUTPUT_APK" "$MICROG_FILE" && { echo "Release $TAG created."; exit 0; }
+          # Creation failed — only tolerate the "tag already exists" case.
+          # Previously every failure was swallowed, which is why the repo had
+          # zero published releases despite successful builds.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists — skipping."
+          else
+            echo "::error::Failed to create release $TAG." && exit 1
+          fi
 
       - name: Save build cache
         if: steps.gate.outputs.build == 'true'
