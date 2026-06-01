@@ -11,6 +11,10 @@ on:
         description: 'Diagnostic: build with ONLY the microG patch (no other patches) to isolate launch crashes'
         type: boolean
         default: false
+      youtube_apk_url:
+        description: 'Optional: direct download URL to a YouTube APK/bundle (e.g. a GitHub Release asset you uploaded). Bypasses the APKMirror download when set.'
+        type: string
+        default: ''
   schedule:
     - cron: '0 6 * * *'
 
@@ -138,11 +142,35 @@ jobs:
         env:
           UA: "Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"
         run: |
+          mkdir -p yt-dl
+
+          # --- Manual override: download from a user-supplied URL and skip APKMirror. ---
+          # Use this when APKMirror Cloudflare-blocks the runner: download the YouTube
+          # bundle yourself (residential IP), upload it (e.g. a GitHub Release asset),
+          # and pass its direct link as the youtube_apk_url input.
+          URL="${{ github.event.inputs.youtube_apk_url }}"
+          if [ -n "$URL" ]; then
+            echo "Using manually supplied YouTube URL (bypassing APKMirror)."
+            case "$URL" in
+              *.apkm*) OUT="yt-dl/youtube-${YT_VERSION}.apkm" ;;
+              *.xapk*) OUT="yt-dl/youtube-${YT_VERSION}.xapk" ;;
+              *.apks*) OUT="yt-dl/youtube-${YT_VERSION}.apks" ;;
+              *)       OUT="yt-dl/youtube-${YT_VERSION}.apk"  ;;
+            esac
+            curl -fSL -H "User-Agent: $UA" "$URL" -o "$OUT"
+            YT_FILE=$(find yt-dl -type f \( -name '*.apkm' -o -name '*.xapk' -o -name '*.apks' -o -name '*.apk' \) -size +1M | head -1)
+            if [ -z "$YT_FILE" ]; then
+              echo "::error::Download from youtube_apk_url failed or the file is too small." && exit 1
+            fi
+            echo "Downloaded: $YT_FILE"
+            echo "YT_APK=$YT_FILE" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # APKMirror download ported from the battle-tested j-hc/revanced-magisk-module
           # flow: a browser-like User-Agent + a persistent cookie jar, walking the
           # variants page -> download page -> final link with htmlq. We grab the
           # arm64-v8a (fallback universal) nodpi BUNDLE; morphe-cli merges the .apkm.
-          mkdir -p yt-dl
           # Install htmlq (HTML query CLI used to parse APKMirror's pages).
           HQ_URL=$(curl -sf "https://api.github.com/repos/mgdm/htmlq/releases/latest" \
             | jq -r '.assets[]|select(.name|test("x86_64.*linux"))|.browser_download_url' | head -1)
